@@ -5,6 +5,10 @@ import electron from "vite-plugin-electron/simple";
 
 // https://vitejs.dev/config/
 export default defineConfig({
+	server: {
+		port: 5174,
+		strictPort: true,
+	},
 	plugins: [
 		react(),
 		electron({
