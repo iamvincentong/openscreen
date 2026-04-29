@@ -44,6 +44,34 @@ contextBridge.exposeInMainWorld("electronAPI", {
 		return ipcRenderer.invoke("store-recorded-session", payload);
 	},
 
+	recordingStreamOpen: (fileName: string) => {
+		return ipcRenderer.invoke("recording-stream:open", { fileName });
+	},
+	recordingStreamAppend: (token: number, chunk: ArrayBuffer) => {
+		return ipcRenderer.invoke("recording-stream:append", token, chunk);
+	},
+	recordingStreamClose: (token: number) => {
+		return ipcRenderer.invoke("recording-stream:close", token);
+	},
+	recordingStreamCancel: (token: number) => {
+		return ipcRenderer.invoke("recording-stream:cancel", token);
+	},
+	recordingStreamDiscard: (filePath: string) => {
+		return ipcRenderer.invoke("recording-stream:discard", filePath);
+	},
+	recordingStreamDiag: (filePath: string, event: Record<string, unknown>) => {
+		return ipcRenderer.invoke("recording-stream:diag", filePath, event);
+	},
+	recordingStreamFinalize: (payload: {
+		screen: { filePaths: string[]; fileName: string };
+		webcam?: { filePaths: string[]; fileName: string };
+		durationMs: number;
+		segmentOffsets: number[];
+		createdAt?: number;
+	}) => {
+		return ipcRenderer.invoke("recording-stream:finalize", payload);
+	},
+
 	getRecordedVideoPath: () => {
 		return ipcRenderer.invoke("get-recorded-video-path");
 	},
@@ -57,6 +85,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
 		const listener = () => callback();
 		ipcRenderer.on("stop-recording-from-tray", listener);
 		return () => ipcRenderer.removeListener("stop-recording-from-tray", listener);
+	},
+	onStopRecordingDiskLow: (callback: (info: { bytesAvailable: number }) => void) => {
+		const listener = (_event: unknown, info: { bytesAvailable: number }) => callback(info);
+		ipcRenderer.on("recording-stream:disk-low", listener);
+		return () => ipcRenderer.removeListener("recording-stream:disk-low", listener);
 	},
 	openExternalUrl: (url: string) => {
 		return ipcRenderer.invoke("open-external-url", url);

@@ -1,3 +1,4 @@
+import { createWriteStream, type WriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -20,6 +21,7 @@ import {
 } from "../../src/lib/recordingSession";
 import { mainT } from "../i18n";
 import { RECORDINGS_DIR } from "../main";
+import { patchWebmDuration, stitchWebmSegments } from "../recordingFinalize";
 
 const PROJECT_FILE_EXTENSION = "openscreen";
 const SHORTCUTS_FILE = path.join(app.getPath("userData"), "shortcuts.json");
@@ -312,6 +314,176 @@ let cursorCaptureInterval: NodeJS.Timeout | null = null;
 let cursorCaptureStartTimeMs = 0;
 let activeCursorSamples: CursorTelemetryPoint[] = [];
 let pendingCursorSamples: CursorTelemetryPoint[] = [];
+
+interface ActiveRecordingStream {
+	stream: WriteStream;
+	filePath: string;
+	closed: boolean;
+}
+
+const activeRecordingStreams = new Map<number, ActiveRecordingStream>();
+let nextRecordingStreamToken = 1;
+
+const DISK_SAFETY_THRESHOLD_BYTES = 500 * 1024 * 1024; // 500 MB headroom before forcing graceful stop
+const DISK_CHECK_INTERVAL_MS = 5000;
+let diskWatchdogTimer: NodeJS.Timeout | null = null;
+let diskLowSignaled = false;
+
+function broadcastDiskLow(getMainWindow: () => BrowserWindow | null, bytesAvailable: number) {
+	if (diskLowSignaled) return;
+	diskLowSignaled = true;
+	const win = getMainWindow();
+	if (win && !win.isDestroyed()) {
+		win.webContents.send("recording-stream:disk-low", { bytesAvailable });
+	}
+	for (const wc of BrowserWindow.getAllWindows()) {
+		if (!wc.isDestroyed() && wc.webContents !== win?.webContents) {
+			wc.webContents.send("recording-stream:disk-low", { bytesAvailable });
+		}
+	}
+}
+
+async function checkDiskSpace(getMainWindow: () => BrowserWindow | null) {
+	try {
+		const stats = await fs.statfs(RECORDINGS_DIR);
+		const bytesAvailable = Number(stats.bavail) * Number(stats.bsize);
+		if (Number.isFinite(bytesAvailable) && bytesAvailable < DISK_SAFETY_THRESHOLD_BYTES) {
+			broadcastDiskLow(getMainWindow, bytesAvailable);
+		}
+	} catch (error) {
+		console.warn("Disk space check failed:", error);
+	}
+}
+
+function ensureDiskWatchdog(getMainWindow: () => BrowserWindow | null) {
+	if (diskWatchdogTimer) return;
+	diskLowSignaled = false;
+	void checkDiskSpace(getMainWindow);
+	diskWatchdogTimer = setInterval(() => {
+		void checkDiskSpace(getMainWindow);
+	}, DISK_CHECK_INTERVAL_MS);
+}
+
+function maybeStopDiskWatchdog() {
+	if (activeRecordingStreams.size > 0) return;
+	if (diskWatchdogTimer) {
+		clearInterval(diskWatchdogTimer);
+		diskWatchdogTimer = null;
+	}
+	diskLowSignaled = false;
+}
+
+function endStream(stream: WriteStream): Promise<void> {
+	return new Promise((resolve, reject) => {
+		stream.end((err: Error | null | undefined) => (err ? reject(err) : resolve()));
+	});
+}
+
+function destroyStream(stream: WriteStream): Promise<void> {
+	return new Promise((resolve) => {
+		stream.once("close", () => resolve());
+		stream.destroy();
+	});
+}
+
+interface FinalizeStreamedRecordingInput {
+	screen: { filePaths: string[]; fileName: string };
+	webcam?: { filePaths: string[]; fileName: string };
+	durationMs: number;
+	segmentOffsets: number[];
+	createdAt?: number;
+}
+
+async function finalizeStreamedRecordingFiles(payload: FinalizeStreamedRecordingInput) {
+	const createdAt =
+		typeof payload.createdAt === "number" && Number.isFinite(payload.createdAt)
+			? payload.createdAt
+			: Date.now();
+
+	const screenVideoPath = resolveRecordingOutputPath(payload.screen.fileName);
+	const [screenBasePath, ...screenAdditional] = payload.screen.filePaths;
+	if (!screenBasePath || path.resolve(screenBasePath) !== path.resolve(screenVideoPath)) {
+		throw new Error("Screen file path does not match resolved recordings path");
+	}
+	for (const p of screenAdditional) {
+		if (!isPathWithinDir(p, RECORDINGS_DIR)) {
+			throw new Error("Screen segment path outside recordings directory");
+		}
+	}
+	if (screenAdditional.length > 0) {
+		await stitchWebmSegments(
+			screenVideoPath,
+			screenAdditional,
+			payload.segmentOffsets.slice(1),
+		).catch((err) => {
+			console.warn("Failed to stitch screen segments:", err);
+		});
+		for (const p of screenAdditional) {
+			await fs.unlink(p).catch(() => undefined);
+		}
+	}
+	await patchWebmDuration(screenVideoPath, payload.durationMs).catch((error) => {
+		console.warn("Failed to patch screen WebM duration:", error);
+	});
+
+	let webcamVideoPath: string | undefined;
+	if (payload.webcam) {
+		webcamVideoPath = resolveRecordingOutputPath(payload.webcam.fileName);
+		const [webcamBasePath, ...webcamAdditional] = payload.webcam.filePaths;
+		if (!webcamBasePath || path.resolve(webcamBasePath) !== path.resolve(webcamVideoPath)) {
+			throw new Error("Webcam file path does not match resolved recordings path");
+		}
+		for (const p of webcamAdditional) {
+			if (!isPathWithinDir(p, RECORDINGS_DIR)) {
+				throw new Error("Webcam segment path outside recordings directory");
+			}
+		}
+		if (webcamAdditional.length > 0) {
+			await stitchWebmSegments(
+				webcamVideoPath,
+				webcamAdditional,
+				payload.segmentOffsets.slice(1),
+			).catch((err) => {
+				console.warn("Failed to stitch webcam segments:", err);
+			});
+			for (const p of webcamAdditional) {
+				await fs.unlink(p).catch(() => undefined);
+			}
+		}
+		await patchWebmDuration(webcamVideoPath, payload.durationMs).catch((error) => {
+			console.warn("Failed to patch webcam WebM duration:", error);
+		});
+	}
+
+	const session: RecordingSession = webcamVideoPath
+		? { screenVideoPath, webcamVideoPath, createdAt }
+		: { screenVideoPath, createdAt };
+	setCurrentRecordingSessionState(session);
+	currentProjectPath = null;
+
+	const telemetryPath = `${screenVideoPath}.cursor.json`;
+	if (pendingCursorSamples.length > 0) {
+		await fs.writeFile(
+			telemetryPath,
+			JSON.stringify({ version: CURSOR_TELEMETRY_VERSION, samples: pendingCursorSamples }, null, 2),
+			"utf-8",
+		);
+	}
+	pendingCursorSamples = [];
+
+	const sessionManifestPath = path.join(
+		RECORDINGS_DIR,
+		`${path.parse(payload.screen.fileName).name}${RECORDING_SESSION_SUFFIX}`,
+	);
+	await fs.writeFile(sessionManifestPath, JSON.stringify(session, null, 2), "utf-8");
+
+	return {
+		success: true,
+		path: screenVideoPath,
+		session,
+		message: "Recording session stored successfully",
+	};
+}
 
 function clamp(value: number, min: number, max: number) {
 	return Math.min(max, Math.max(min, value));
@@ -1142,4 +1314,153 @@ export function registerIpcHandlers(
 			return { success: false, error: String(error) };
 		}
 	});
+
+	ipcMain.handle("recording-stream:open", async (_, params: { fileName: string }) => {
+		try {
+			if (!params || typeof params.fileName !== "string") {
+				return { success: false, error: "Invalid open params" };
+			}
+			const filePath = resolveRecordingOutputPath(params.fileName);
+			await fs.mkdir(path.dirname(filePath), { recursive: true });
+			const stream = createWriteStream(filePath);
+			await new Promise<void>((resolve, reject) => {
+				const onError = (err: Error) => {
+					stream.off("open", onOpen);
+					reject(err);
+				};
+				const onOpen = () => {
+					stream.off("error", onError);
+					resolve();
+				};
+				stream.once("error", onError);
+				stream.once("open", onOpen);
+			});
+			const token = nextRecordingStreamToken++;
+			activeRecordingStreams.set(token, { stream, filePath, closed: false });
+			ensureDiskWatchdog(getMainWindow);
+			return { success: true, token, filePath };
+		} catch (error) {
+			console.error("Failed to open recording stream:", error);
+			return { success: false, error: String(error) };
+		}
+	});
+
+	ipcMain.handle("recording-stream:append", async (_, token: number, chunk: ArrayBuffer) => {
+		const entry = activeRecordingStreams.get(token);
+		if (!entry || entry.closed) {
+			return { success: false, error: "Recording stream is not open" };
+		}
+		try {
+			const buf = Buffer.from(chunk);
+			await new Promise<void>((resolve, reject) => {
+				const ok = entry.stream.write(buf, (err) => {
+					if (err) reject(err);
+					else if (ok) resolve();
+				});
+				if (!ok) {
+					entry.stream.once("drain", () => resolve());
+				}
+			});
+			return { success: true };
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException)?.code;
+			if (code === "ENOSPC") {
+				broadcastDiskLow(getMainWindow, 0);
+			}
+			console.error("Failed to append to recording stream:", error);
+			return { success: false, error: String(error) };
+		}
+	});
+
+	ipcMain.handle("recording-stream:close", async (_, token: number) => {
+		const entry = activeRecordingStreams.get(token);
+		if (!entry) {
+			return { success: false, error: "Recording stream is not open" };
+		}
+		if (entry.closed) {
+			return { success: true, filePath: entry.filePath };
+		}
+		entry.closed = true;
+		try {
+			await endStream(entry.stream);
+			activeRecordingStreams.delete(token);
+			maybeStopDiskWatchdog();
+			return { success: true, filePath: entry.filePath };
+		} catch (error) {
+			activeRecordingStreams.delete(token);
+			maybeStopDiskWatchdog();
+			console.error("Failed to close recording stream:", error);
+			return { success: false, error: String(error), filePath: entry.filePath };
+		}
+	});
+
+	ipcMain.handle("recording-stream:cancel", async (_, token: number) => {
+		const entry = activeRecordingStreams.get(token);
+		if (!entry) {
+			return { success: true };
+		}
+		entry.closed = true;
+		activeRecordingStreams.delete(token);
+		maybeStopDiskWatchdog();
+		try {
+			await destroyStream(entry.stream);
+		} catch (error) {
+			console.warn("Failed to destroy recording stream:", error);
+		}
+		await fs.unlink(entry.filePath).catch(() => undefined);
+		return { success: true };
+	});
+
+	ipcMain.handle("recording-stream:discard", async (_, filePath: string) => {
+		try {
+			if (typeof filePath !== "string" || !filePath) {
+				return { success: false, error: "Invalid file path" };
+			}
+			if (!isPathWithinDir(filePath, RECORDINGS_DIR)) {
+				return { success: false, error: "Path outside recordings directory" };
+			}
+			await fs.unlink(filePath).catch(() => undefined);
+			return { success: true };
+		} catch (error) {
+			console.error("Failed to discard recording file:", error);
+			return { success: false, error: String(error) };
+		}
+	});
+
+	ipcMain.handle(
+		"recording-stream:diag",
+		async (_, filePath: string, event: Record<string, unknown>) => {
+			try {
+				if (typeof filePath !== "string" || !filePath) {
+					return { success: false, error: "Invalid file path" };
+				}
+				if (!isPathWithinDir(filePath, RECORDINGS_DIR)) {
+					return { success: false, error: "Path outside recordings directory" };
+				}
+				const diagPath = `${filePath}.diag.jsonl`;
+				const line = `${JSON.stringify({ t: Date.now(), ...event })}\n`;
+				await fs.appendFile(diagPath, line, "utf-8");
+				return { success: true };
+			} catch (error) {
+				console.error("Failed to write recording diag:", error);
+				return { success: false, error: String(error) };
+			}
+		},
+	);
+
+	ipcMain.handle(
+		"recording-stream:finalize",
+		async (_, payload: FinalizeStreamedRecordingInput) => {
+			try {
+				return await finalizeStreamedRecordingFiles(payload);
+			} catch (error) {
+				console.error("Failed to finalize streamed recording:", error);
+				return {
+					success: false,
+					message: "Failed to finalize streamed recording",
+					error: String(error),
+				};
+			}
+		},
+	);
 }

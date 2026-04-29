@@ -1,4 +1,3 @@
-import { fixWebmDuration } from "@fix-webm-duration/fix";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useScopedT } from "@/contexts/I18nContext";
@@ -39,6 +38,8 @@ const WEBCAM_TARGET_WIDTH = 1280;
 const WEBCAM_TARGET_HEIGHT = 720;
 const WEBCAM_TARGET_FRAME_RATE = 30;
 
+const SEGMENT_ROTATION_MS = 60 * 60 * 1000;
+
 type UseScreenRecorderReturn = {
 	recording: boolean;
 	paused: boolean;
@@ -61,29 +62,107 @@ type UseScreenRecorderReturn = {
 
 type RecorderHandle = {
 	recorder: MediaRecorder;
-	recordedBlobPromise: Promise<Blob>;
+	recordedFilePromise: Promise<string>;
+	filePath: string;
+	token: number;
 };
 
-function createRecorderHandle(stream: MediaStream, options: MediaRecorderOptions): RecorderHandle {
+const logRecorderDiag = (filePath: string, event: Record<string, unknown>): void => {
+	void window.electronAPI.recordingStreamDiag(filePath, event).catch(() => undefined);
+};
+
+async function createRecorderHandle(
+	stream: MediaStream,
+	options: MediaRecorderOptions,
+	fileName: string,
+): Promise<RecorderHandle> {
+	const openResult = await window.electronAPI.recordingStreamOpen(fileName);
+	if (!openResult.success || openResult.token === undefined || !openResult.filePath) {
+		throw new Error(openResult.error || "Failed to open recording stream");
+	}
+	const token = openResult.token;
+	const filePath = openResult.filePath;
+
 	const recorder = new MediaRecorder(stream, options);
-	const chunks: Blob[] = [];
-	const mimeType = options.mimeType || "video/webm";
-	const recordedBlobPromise = new Promise<Blob>((resolve, reject) => {
-		recorder.ondataavailable = (event: BlobEvent) => {
-			if (event.data && event.data.size > 0) {
-				chunks.push(event.data);
+
+	let writeChain: Promise<void> = Promise.resolve();
+	let appendFailureSeen = false;
+
+	const stopRecorderSafely = () => {
+		try {
+			if (recorder.state !== "inactive") {
+				recorder.stop();
 			}
+		} catch {
+			// Recorder may already be stopping.
+		}
+	};
+
+	const recordedFilePromise = new Promise<string>((resolve, reject) => {
+		recorder.ondataavailable = (event: BlobEvent) => {
+			if (!event.data || event.data.size === 0) return;
+			const dataPromise = event.data.arrayBuffer();
+			writeChain = writeChain
+				.then(async () => {
+					const buf = await dataPromise;
+					const result = await window.electronAPI.recordingStreamAppend(token, buf);
+					if (!result?.success) {
+						throw new Error(result?.error || "Recording append failed");
+					}
+				})
+				.catch((err) => {
+					if (!appendFailureSeen) {
+						appendFailureSeen = true;
+						console.warn("Recording chunk write failed; finalizing what's on disk:", err);
+						logRecorderDiag(filePath, {
+							tag: "append.fail",
+							error: err instanceof Error ? err.message : String(err),
+							recorderState: recorder.state,
+						});
+						stopRecorderSafely();
+					}
+				});
 		};
-		recorder.onerror = () => {
-			reject(new Error("Recording failed"));
+		recorder.onerror = (event) => {
+			console.warn("MediaRecorder error; finalizing what's on disk:", event);
+			const evtError = (event as Event & { error?: { name?: string; message?: string } }).error;
+			logRecorderDiag(filePath, {
+				tag: "recorder.error",
+				errorName: evtError?.name ?? null,
+				errorMessage: evtError?.message ?? null,
+				recorderState: recorder.state,
+			});
+			stopRecorderSafely();
 		};
 		recorder.onstop = () => {
-			resolve(new Blob(chunks, { type: mimeType }));
+			logRecorderDiag(filePath, { tag: "recorder.stop", recorderState: recorder.state });
+			writeChain
+				.then(async () => {
+					const closeResult = await window.electronAPI.recordingStreamClose(token);
+					if (!closeResult?.success || !closeResult.filePath) {
+						throw new Error(closeResult?.error || "Failed to close recording stream");
+					}
+					return closeResult.filePath;
+				})
+				.then(resolve, reject);
 		};
 	});
 
 	recorder.start(RECORDER_TIMESLICE_MS);
-	return { recorder, recordedBlobPromise };
+	const startVideoTrack = stream.getVideoTracks()[0];
+	const startVideoSettings = startVideoTrack?.getSettings() ?? {};
+	logRecorderDiag(filePath, {
+		tag: "recorder.start",
+		mimeType: options.mimeType ?? null,
+		videoBitsPerSecond: options.videoBitsPerSecond ?? null,
+		audioBitsPerSecond: options.audioBitsPerSecond ?? null,
+		timesliceMs: RECORDER_TIMESLICE_MS,
+		width: startVideoSettings.width ?? null,
+		height: startVideoSettings.height ?? null,
+		frameRate: startVideoSettings.frameRate ?? null,
+		audioTrackCount: stream.getAudioTracks().length,
+	});
+	return { recorder, recordedFilePromise, filePath, token };
 }
 
 export function useScreenRecorder(): UseScreenRecorderReturn {
@@ -114,6 +193,16 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	const [countdownActive, setCountdownActive] = useState(false);
 	const webcamReady = useRef(false);
 	const webcamAcquireId = useRef(0);
+	const segmentHistory = useRef<
+		Array<{ screenFilePath: string; webcamFilePath: string | null; cumulativeDurationMs: number }>
+	>([]);
+	const segmentRotationTimer = useRef<number | null>(null);
+	const rotating = useRef(false);
+	const recorderOptions = useRef<{
+		mimeType: string;
+		videoBitsPerSecond: number;
+		audioBitsPerSecond?: number;
+	} | null>(null);
 
 	const getRecordingDurationMs = useCallback(() => {
 		const segmentDuration =
@@ -123,9 +212,8 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 
 	const selectMimeType = () => {
 		const preferred = [
-			"video/webm;codecs=av1",
-			"video/webm;codecs=h264",
 			"video/webm;codecs=vp9",
+			"video/webm;codecs=h264",
 			"video/webm;codecs=vp8",
 			"video/webm",
 		];
@@ -285,6 +373,14 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			}
 			finalizingRecordingId.current = activeRecordingId;
 
+			// Capture segment history synchronously before any async work
+			const capturedSegments = segmentHistory.current.slice();
+			segmentHistory.current = [];
+			if (segmentRotationTimer.current !== null) {
+				window.clearTimeout(segmentRotationTimer.current);
+				segmentRotationTimer.current = null;
+			}
+
 			if (screenRecorder.current === activeScreenRecorder) {
 				screenRecorder.current = null;
 			}
@@ -302,41 +398,54 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 
 			void (async () => {
 				try {
-					const screenBlob = await activeScreenRecorder.recordedBlobPromise;
-					if (discardRecordingId.current === activeRecordingId) {
-						return;
-					}
-					if (screenBlob.size === 0) {
-						return;
-					}
+					const screenFilePath = await activeScreenRecorder.recordedFilePromise;
+					const webcamFilePath = activeWebcamRecorder
+						? await activeWebcamRecorder.recordedFilePromise.catch(() => null)
+						: null;
 
-					const fixedScreenBlob = await fixWebmDuration(screenBlob, duration);
-					let fixedWebcamBlob: Blob | null = null;
-					if (activeWebcamRecorder) {
-						const webcamBlob = await activeWebcamRecorder.recordedBlobPromise.catch(() => null);
-						if (webcamBlob && webcamBlob.size > 0) {
-							fixedWebcamBlob = await fixWebmDuration(webcamBlob, duration);
+					if (discardRecordingId.current === activeRecordingId) {
+						for (const seg of capturedSegments) {
+							await window.electronAPI
+								.recordingStreamDiscard(seg.screenFilePath)
+								.catch(() => undefined);
+							if (seg.webcamFilePath) {
+								await window.electronAPI
+									.recordingStreamDiscard(seg.webcamFilePath)
+									.catch(() => undefined);
+							}
 						}
+						await window.electronAPI.recordingStreamDiscard(screenFilePath).catch(() => undefined);
+						if (webcamFilePath) {
+							await window.electronAPI
+								.recordingStreamDiscard(webcamFilePath)
+								.catch(() => undefined);
+						}
+						return;
 					}
 
 					const screenFileName = `${RECORDING_FILE_PREFIX}${activeRecordingId}${VIDEO_FILE_EXTENSION}`;
 					const webcamFileName = `${RECORDING_FILE_PREFIX}${activeRecordingId}${WEBCAM_FILE_SUFFIX}${VIDEO_FILE_EXTENSION}`;
-					const result = await window.electronAPI.storeRecordedSession({
-						screen: {
-							videoData: await fixedScreenBlob.arrayBuffer(),
-							fileName: screenFileName,
-						},
-						webcam: fixedWebcamBlob
+
+					const allScreenPaths = [...capturedSegments.map((s) => s.screenFilePath), screenFilePath];
+					const allWebcamPaths = [...capturedSegments.map((s) => s.webcamFilePath), webcamFilePath];
+					const hasWebcam = allWebcamPaths.some((p) => p !== null);
+					const segmentOffsets = [0, ...capturedSegments.map((s) => s.cumulativeDurationMs)];
+
+					const result = await window.electronAPI.recordingStreamFinalize({
+						screen: { filePaths: allScreenPaths, fileName: screenFileName },
+						webcam: hasWebcam
 							? {
-									videoData: await fixedWebcamBlob.arrayBuffer(),
+									filePaths: allWebcamPaths.map((p, i) => p ?? allScreenPaths[i]),
 									fileName: webcamFileName,
 								}
 							: undefined,
+						durationMs: duration,
+						segmentOffsets,
 						createdAt: activeRecordingId,
 					});
 
 					if (!result.success) {
-						console.error("Failed to store recording session:", result.message);
+						console.error("Failed to finalize recording session:", result.message);
 						return;
 					}
 
@@ -403,6 +512,143 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		}
 	});
 
+	const doRotate = useRef(async () => {
+		if (rotating.current || restarting.current) return;
+		const activeScreenRecorder = screenRecorder.current;
+		if (!activeScreenRecorder || activeScreenRecorder.recorder.state === "inactive") return;
+		if (!stream.current) return;
+
+		rotating.current = true;
+		allowAutoFinalize.current = false;
+
+		try {
+			const cumulativeDurationMs = getRecordingDurationMs();
+			const activeWebcamRecorder = webcamRecorder.current;
+
+			try {
+				activeScreenRecorder.recorder.stop();
+			} catch {
+				/* already stopping */
+			}
+			if (activeWebcamRecorder) {
+				try {
+					activeWebcamRecorder.recorder.stop();
+				} catch {
+					/* already stopping */
+				}
+			}
+
+			const [screenFilePath, webcamFilePath] = await Promise.all([
+				activeScreenRecorder.recordedFilePromise.catch(() => null),
+				activeWebcamRecorder
+					? activeWebcamRecorder.recordedFilePromise.catch(() => null)
+					: Promise.resolve(null),
+			]);
+
+			if (!screenFilePath) {
+				console.warn("Segment rotation: screen write failed, stopping recording");
+				allowAutoFinalize.current = true;
+				rotating.current = false;
+				finalizeRecording(
+					activeScreenRecorder,
+					activeWebcamRecorder ?? null,
+					cumulativeDurationMs,
+					recordingId.current,
+				);
+				return;
+			}
+
+			segmentHistory.current.push({
+				screenFilePath,
+				webcamFilePath: webcamFilePath ?? null,
+				cumulativeDurationMs,
+			});
+			accumulatedDurationMs.current = cumulativeDurationMs;
+			segmentStartedAt.current = Date.now();
+
+			const n = segmentHistory.current.length + 1;
+			const pad = String(n).padStart(3, "0");
+			const newScreenFileName = `${RECORDING_FILE_PREFIX}${recordingId.current}-s${pad}${VIDEO_FILE_EXTENSION}`;
+			const newWebcamFileName = `${RECORDING_FILE_PREFIX}${recordingId.current}-s${pad}${WEBCAM_FILE_SUFFIX}${VIDEO_FILE_EXTENSION}`;
+
+			const opts = recorderOptions.current;
+			if (!opts || !stream.current) {
+				allowAutoFinalize.current = true;
+				rotating.current = false;
+				return;
+			}
+
+			let newScreenHandle: RecorderHandle;
+			try {
+				newScreenHandle = await createRecorderHandle(stream.current, opts, newScreenFileName);
+			} catch (err) {
+				console.error("Segment rotation: failed to open new screen handle", err);
+				allowAutoFinalize.current = true;
+				rotating.current = false;
+				return;
+			}
+
+			let newWebcamHandle: RecorderHandle | null = null;
+			if (webcamStream.current && activeWebcamRecorder) {
+				try {
+					newWebcamHandle = await createRecorderHandle(
+						webcamStream.current,
+						{
+							mimeType: opts.mimeType,
+							videoBitsPerSecond: Math.min(opts.videoBitsPerSecond, BITRATE_BASE),
+						},
+						newWebcamFileName,
+					);
+				} catch {
+					/* webcam segment failed; continue without webcam */
+				}
+			}
+
+			screenRecorder.current = newScreenHandle;
+			webcamRecorder.current = newWebcamHandle;
+
+			newScreenHandle.recorder.addEventListener(
+				"error",
+				() => {
+					setRecording(false);
+				},
+				{ once: true },
+			);
+
+			const capturedRecordingId = recordingId.current;
+			newScreenHandle.recorder.addEventListener(
+				"stop",
+				() => {
+					if (!allowAutoFinalize.current) return;
+					finalizeRecording(
+						newScreenHandle,
+						newWebcamHandle,
+						Math.max(0, getRecordingDurationMs()),
+						capturedRecordingId,
+					);
+				},
+				{ once: true },
+			);
+
+			logRecorderDiag(newScreenHandle.filePath, {
+				tag: "segment.rotated",
+				segmentN: n,
+				cumulativeDurationMs,
+			});
+
+			allowAutoFinalize.current = true;
+			segmentRotationTimer.current = window.setTimeout(
+				() => void doRotate.current(),
+				SEGMENT_ROTATION_MS,
+			);
+		} catch (err) {
+			console.error("Segment rotation failed:", err);
+			allowAutoFinalize.current = true;
+		} finally {
+			rotating.current = false;
+		}
+	});
+
 	useEffect(() => {
 		let cleanup: (() => void) | undefined;
 
@@ -412,31 +658,49 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			});
 		}
 
+		let cleanupDiskLow: (() => void) | undefined;
+		if (window.electronAPI?.onStopRecordingDiskLow) {
+			cleanupDiskLow = window.electronAPI.onStopRecordingDiskLow(() => {
+				toast.warning("Disk space low — finalizing recording.");
+				stopRecording.current();
+			});
+		}
+
 		return () => {
 			const activeRunId = countdownRunId.current;
 			if (cleanup) cleanup();
+			if (cleanupDiskLow) cleanupDiskLow();
 			countdownRunId.current += 1;
 			void safeHideCountdownOverlay(activeRunId);
 			allowAutoFinalize.current = false;
 			restarting.current = false;
+			rotating.current = false;
 			discardRecordingId.current = null;
+			if (segmentRotationTimer.current !== null) {
+				window.clearTimeout(segmentRotationTimer.current);
+				segmentRotationTimer.current = null;
+			}
+			segmentHistory.current = [];
+
+			const screenHandle = screenRecorder.current;
+			const webcamHandle = webcamRecorder.current;
 
 			if (
-				screenRecorder.current?.recorder.state === "recording" ||
-				screenRecorder.current?.recorder.state === "paused"
+				screenHandle?.recorder.state === "recording" ||
+				screenHandle?.recorder.state === "paused"
 			) {
 				try {
-					screenRecorder.current.recorder.stop();
+					screenHandle.recorder.stop();
 				} catch {
 					// Ignore recorder teardown errors during cleanup.
 				}
 			}
 			if (
-				webcamRecorder.current?.recorder.state === "recording" ||
-				webcamRecorder.current?.recorder.state === "paused"
+				webcamHandle?.recorder.state === "recording" ||
+				webcamHandle?.recorder.state === "paused"
 			) {
 				try {
-					webcamRecorder.current.recorder.stop();
+					webcamHandle.recorder.stop();
 				} catch {
 					// Ignore recorder teardown errors during cleanup.
 				}
@@ -445,7 +709,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			webcamRecorder.current = null;
 			teardownMedia();
 		};
-	}, [teardownMedia]);
+	}, [teardownMedia, safeHideCountdownOverlay]);
 
 	const safeShowCountdownOverlay = async (value: number, runId: number) => {
 		try {
@@ -734,18 +998,32 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			);
 
 			const hasAudio = stream.current.getAudioTracks().length > 0;
+			const audioBitsPerSecond = hasAudio
+				? systemAudioTrack
+					? AUDIO_BITRATE_SYSTEM
+					: AUDIO_BITRATE_VOICE
+				: undefined;
+			recorderOptions.current = { mimeType, videoBitsPerSecond, audioBitsPerSecond };
+
 			if (!isCountdownRunActive(countdownRunToken)) {
 				teardownMedia();
 				return;
 			}
 
-			screenRecorder.current = createRecorderHandle(stream.current, {
-				mimeType,
-				videoBitsPerSecond,
-				...(hasAudio
-					? { audioBitsPerSecond: systemAudioTrack ? AUDIO_BITRATE_SYSTEM : AUDIO_BITRATE_VOICE }
-					: {}),
-			});
+			segmentHistory.current = [];
+			recordingId.current = Date.now();
+			const screenFileName = `${RECORDING_FILE_PREFIX}${recordingId.current}${VIDEO_FILE_EXTENSION}`;
+			const webcamFileName = `${RECORDING_FILE_PREFIX}${recordingId.current}${WEBCAM_FILE_SUFFIX}${VIDEO_FILE_EXTENSION}`;
+
+			screenRecorder.current = await createRecorderHandle(
+				stream.current,
+				{
+					mimeType,
+					videoBitsPerSecond,
+					...(audioBitsPerSecond !== undefined ? { audioBitsPerSecond } : {}),
+				},
+				screenFileName,
+			);
 			screenRecorder.current.recorder.addEventListener(
 				"error",
 				() => {
@@ -754,14 +1032,34 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				{ once: true },
 			);
 
-			if (webcamStream.current) {
-				webcamRecorder.current = createRecorderHandle(webcamStream.current, {
-					mimeType,
-					videoBitsPerSecond: Math.min(videoBitsPerSecond, BITRATE_BASE),
+			const screenFilePathForDiag = screenRecorder.current.filePath;
+			const wireTrackEndedDiag = (track: MediaStreamTrack | null | undefined, hint: string) => {
+				if (!track) return;
+				track.addEventListener("ended", () => {
+					logRecorderDiag(screenFilePathForDiag, {
+						tag: "track.ended",
+						hint,
+						kind: track.kind,
+						label: track.label,
+						readyState: track.readyState,
+					});
 				});
+			};
+			wireTrackEndedDiag(videoTrack, "screen.video");
+			wireTrackEndedDiag(systemAudioTrack, "screen.audio");
+			wireTrackEndedDiag(micAudioTrack, "mic");
+
+			if (webcamStream.current) {
+				webcamRecorder.current = await createRecorderHandle(
+					webcamStream.current,
+					{
+						mimeType,
+						videoBitsPerSecond: Math.min(videoBitsPerSecond, BITRATE_BASE),
+					},
+					webcamFileName,
+				);
 			}
 
-			recordingId.current = Date.now();
 			accumulatedDurationMs.current = 0;
 			segmentStartedAt.current = Date.now();
 			allowAutoFinalize.current = true;
@@ -769,6 +1067,11 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			setPaused(false);
 			setElapsedSeconds(0);
 			window.electronAPI?.setRecordingState(true);
+			if (segmentRotationTimer.current !== null) window.clearTimeout(segmentRotationTimer.current);
+			segmentRotationTimer.current = window.setTimeout(
+				() => void doRotate.current(),
+				SEGMENT_ROTATION_MS,
+			);
 
 			const activeScreenRecorder = screenRecorder.current;
 			const activeWebcamRecorder = webcamRecorder.current;
@@ -872,6 +1175,11 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		const activeWebcamRecorder = webcamRecorder.current;
 		const activeRecordingId = recordingId.current;
 
+		if (segmentRotationTimer.current !== null) {
+			window.clearTimeout(segmentRotationTimer.current);
+			segmentRotationTimer.current = null;
+		}
+
 		restarting.current = true;
 		discardRecordingId.current = activeRecordingId;
 
@@ -923,6 +1231,10 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	}, [getRecordingDurationMs, paused, recording]);
 
 	const cancelRecording = () => {
+		if (segmentRotationTimer.current !== null) {
+			window.clearTimeout(segmentRotationTimer.current);
+			segmentRotationTimer.current = null;
+		}
 		const activeScreenRecorder = screenRecorder.current;
 		if (
 			activeScreenRecorder?.recorder.state === "recording" ||

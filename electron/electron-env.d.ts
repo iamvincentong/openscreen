@@ -57,6 +57,38 @@ interface Window {
 			message?: string;
 			error?: string;
 		}>;
+		recordingStreamOpen: (fileName: string) => Promise<{
+			success: boolean;
+			token?: number;
+			filePath?: string;
+			error?: string;
+		}>;
+		recordingStreamAppend: (
+			token: number,
+			chunk: ArrayBuffer,
+		) => Promise<{ success: boolean; error?: string }>;
+		recordingStreamClose: (
+			token: number,
+		) => Promise<{ success: boolean; filePath?: string; error?: string }>;
+		recordingStreamCancel: (token: number) => Promise<{ success: boolean; error?: string }>;
+		recordingStreamDiscard: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+		recordingStreamDiag: (
+			filePath: string,
+			event: Record<string, unknown>,
+		) => Promise<{ success: boolean; error?: string }>;
+		recordingStreamFinalize: (payload: {
+			screen: { filePaths: string[]; fileName: string };
+			webcam?: { filePaths: string[]; fileName: string };
+			durationMs: number;
+			segmentOffsets: number[];
+			createdAt?: number;
+		}) => Promise<{
+			success: boolean;
+			path?: string;
+			session?: import("../src/lib/recordingSession").RecordingSession;
+			message?: string;
+			error?: string;
+		}>;
 		getRecordedVideoPath: () => Promise<{
 			success: boolean;
 			path?: string;
@@ -71,6 +103,7 @@ interface Window {
 			error?: string;
 		}>;
 		onStopRecordingFromTray: (callback: () => void) => () => void;
+		onStopRecordingDiskLow: (callback: (info: { bytesAvailable: number }) => void) => () => void;
 		openExternalUrl: (url: string) => Promise<{ success: boolean; error?: string }>;
 		saveExportedVideo: (
 			videoData: ArrayBuffer,
