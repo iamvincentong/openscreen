@@ -8,6 +8,7 @@
 		"failedToSaveVideo": "Video kaydedilemedi",
 		"exportFailed": "Dışa aktarım başarısız oldu",
 		"exportFailedWithError": "Dışa aktarım başarısız: {{error}}",
+		"exportBackgroundLoadFailed": "Dışa aktarım başarısız: arka plan görüntüsü yüklenemedi ({{url}})",
 		"failedToSaveExport": "Dışa aktarım kaydedilemedi",
 		"failedToSaveExportedVideo": "Dışa aktarılan video kaydedilemedi",
 		"failedToRevealInFolder": "Klasörde gösterme hatası: {{error}}"
@@ -30,6 +31,15 @@
 		"systemAudioUnavailable": "Sistem sesi kullanılamıyor. Sistem sesi olmadan kaydediliyor.",
 		"microphoneDenied": "Mikrofon erişimi reddedildi. Kayıt ses olmadan devam edecek.",
 		"cameraDenied": "Kamera erişimi reddedildi. Kayıt kamera olmadan devam edecek.",
-		"permissionDenied": "Kayıt izni reddedildi. Lütfen ekran kaydına izin verin."
+		"permissionDenied": "Kayıt izni reddedildi. Lütfen ekran kaydına izin verin.",
+		"cameraDisconnected": "Webcam bağlantısı kesildi.",
+		"cameraNotFound": "Kamera bulunamadı."
+	},
+	"loadingVideo": "Video yükleniyor...",
+	"newRecording": {
+		"title": "Kaydediciye Dön",
+		"description": "Mevcut oturumunuz kaydedildi.",
+		"cancel": "İptal",
+		"confirm": "Onayla"
 	}
 }

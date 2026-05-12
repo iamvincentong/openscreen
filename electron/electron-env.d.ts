@@ -24,6 +24,9 @@ declare namespace NodeJS {
 // Used in Renderer process, expose in `preload.ts`
 interface Window {
 	electronAPI: {
+		invokeNativeBridge: <TData = unknown>(
+			request: import("../src/native/contracts").NativeBridgeRequest,
+		) => Promise<import("../src/native/contracts").NativeBridgeResponse<TData>>;
 		getSources: (opts: Electron.SourcesOptions) => Promise<ProcessedDesktopSource[]>;
 		switchToEditor: () => Promise<void>;
 		switchToHud: () => Promise<void>;
@@ -37,7 +40,7 @@ interface Window {
 			status: string;
 			error?: string;
 		}>;
-		getAssetBasePath: () => Promise<string | null>;
+		assetBaseUrl: string;
 		storeRecordedVideo: (
 			videoData: ArrayBuffer,
 			fileName: string,
@@ -82,6 +85,7 @@ interface Window {
 			durationMs: number;
 			segmentOffsets: number[];
 			createdAt?: number;
+			cursorCaptureMode?: import("../src/lib/recordingSession").CursorCaptureMode;
 		}) => Promise<{
 			success: boolean;
 			path?: string;
@@ -95,20 +99,59 @@ interface Window {
 			message?: string;
 			error?: string;
 		}>;
-		setRecordingState: (recording: boolean) => Promise<void>;
+		setRecordingState: (
+			recording: boolean,
+			recordingId?: number,
+			cursorCaptureMode?: import("../src/lib/recordingSession").CursorCaptureMode,
+		) => Promise<void>;
+		isNativeWindowsCaptureAvailable: () => Promise<{
+			success: boolean;
+			available: boolean;
+			helperPath?: string;
+			reason?: string;
+			error?: string;
+		}>;
+		startNativeWindowsRecording: (
+			request: import("../src/lib/nativeWindowsRecording").NativeWindowsRecordingRequest,
+		) => Promise<import("../src/lib/nativeWindowsRecording").NativeWindowsRecordingStartResult>;
+		stopNativeWindowsRecording: (discard?: boolean) => Promise<{
+			success: boolean;
+			path?: string;
+			session?: import("../src/lib/recordingSession").RecordingSession;
+			message?: string;
+			discarded?: boolean;
+			error?: string;
+		}>;
+		discardCursorTelemetry: (recordingId: number) => Promise<void>;
 		getCursorTelemetry: (videoPath?: string) => Promise<{
 			success: boolean;
 			samples: CursorTelemetryPoint[];
+			clicks: number[];
 			message?: string;
 			error?: string;
 		}>;
 		onStopRecordingFromTray: (callback: () => void) => () => void;
 		onStopRecordingDiskLow: (callback: (info: { bytesAvailable: number }) => void) => () => void;
 		openExternalUrl: (url: string) => Promise<{ success: boolean; error?: string }>;
-		saveExportedVideo: (
-			videoData: ArrayBuffer,
+		pickExportSavePath: (
 			fileName: string,
-		) => Promise<{ success: boolean; path?: string; message?: string; canceled?: boolean }>;
+			exportFolder?: string,
+		) => Promise<{
+			success: boolean;
+			path?: string;
+			message?: string;
+			canceled?: boolean;
+			error?: string;
+		}>;
+		writeExportToPath: (
+			videoData: ArrayBuffer,
+			filePath: string,
+		) => Promise<{
+			success: boolean;
+			path?: string;
+			message?: string;
+			error?: string;
+		}>;
 		openVideoFilePicker: () => Promise<{ success: boolean; path?: string; canceled?: boolean }>;
 		setCurrentVideoPath: (path: string) => Promise<{ success: boolean }>;
 		setCurrentRecordingSession: (
@@ -168,6 +211,7 @@ interface Window {
 		saveShortcuts: (shortcuts: unknown) => Promise<{ success: boolean; error?: string }>;
 		hudOverlayHide: () => void;
 		hudOverlayClose: () => void;
+		setHudOverlayIgnoreMouseEvents: (ignore: boolean) => void;
 		showCountdownOverlay: (value: number, runId: number) => Promise<void>;
 		setCountdownOverlayValue: (value: number, runId: number) => Promise<void>;
 		hideCountdownOverlay: (runId: number) => Promise<void>;
@@ -175,7 +219,15 @@ interface Window {
 		setMicrophoneExpanded: (expanded: boolean) => void;
 		setHasUnsavedChanges: (hasChanges: boolean) => void;
 		onRequestSaveBeforeClose: (callback: () => Promise<boolean> | boolean) => () => void;
+		onRequestCloseConfirm: (callback: () => void) => () => void;
+		sendCloseConfirmResponse: (choice: "save" | "discard" | "cancel") => void;
 		setLocale: (locale: string) => Promise<void>;
+		saveDiagnostic: (payload: {
+			error: string;
+			stack?: string;
+			projectState: unknown;
+			logs: string[];
+		}) => Promise<{ success: boolean; path?: string; canceled?: boolean; error?: string }>;
 	};
 }
 

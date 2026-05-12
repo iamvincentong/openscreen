@@ -5,6 +5,7 @@
 		"cancel": "Cancel",
 		"confirm": "Confirm"
 	},
+	"loadingVideo": "Loading video...",
 	"errors": {
 		"noVideoLoaded": "No video loaded",
 		"videoNotReady": "Video not ready",
@@ -14,6 +15,7 @@
 		"failedToSaveVideo": "Failed to save video",
 		"exportFailed": "Export failed",
 		"exportFailedWithError": "Export failed: {{error}}",
+		"exportBackgroundLoadFailed": "Export failed: could not load background image ({{url}})",
 		"failedToSaveExport": "Failed to save export",
 		"failedToSaveExportedVideo": "Failed to save exported video",
 		"failedToRevealInFolder": "Error revealing in folder: {{error}}"

@@ -1,5 +1,5 @@
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { BrowserWindow, ipcMain, screen } from "electron";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -9,11 +9,24 @@ const VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
 const RENDERER_DIST = path.join(APP_ROOT, "dist");
 const HEADLESS = process.env["HEADLESS"] === "true";
 
+// Asset base URL for renderer (wallpapers, etc.). Packaged: extraResources copies
+// public/wallpapers -> resources/wallpapers. Unpackaged: <appRoot>/public/.
+const ASSET_BASE_DIR = process.defaultApp
+	? path.join(__dirname, "..", "public")
+	: process.resourcesPath;
+const ASSET_BASE_URL_ARG = `--asset-base-url=${pathToFileURL(`${ASSET_BASE_DIR}${path.sep}`).toString()}`;
+
 let hudOverlayWindow: BrowserWindow | null = null;
 
 ipcMain.on("hud-overlay-hide", () => {
 	if (hudOverlayWindow && !hudOverlayWindow.isDestroyed()) {
 		hudOverlayWindow.minimize();
+	}
+});
+
+ipcMain.on("hud-overlay-ignore-mouse-events", (_event, ignore: boolean) => {
+	if (hudOverlayWindow && !hudOverlayWindow.isDestroyed()) {
+		hudOverlayWindow.setIgnoreMouseEvents(ignore, { forward: true });
 	}
 });
 
@@ -50,11 +63,13 @@ export function createHudOverlayWindow(): BrowserWindow {
 		show: !HEADLESS,
 		webPreferences: {
 			preload: path.join(__dirname, "preload.mjs"),
+			additionalArguments: [ASSET_BASE_URL_ARG],
 			nodeIntegration: false,
 			contextIsolation: true,
 			backgroundThrottling: false,
 		},
 	});
+	win.setIgnoreMouseEvents(true, { forward: true });
 
 	// Follow the user across macOS Spaces (virtual desktops).
 	// Without this the HUD stays pinned to the Space it was first opened on.
@@ -110,6 +125,7 @@ export function createEditorWindow(): BrowserWindow {
 		show: !HEADLESS,
 		webPreferences: {
 			preload: path.join(__dirname, "preload.mjs"),
+			additionalArguments: [ASSET_BASE_URL_ARG],
 			nodeIntegration: false,
 			contextIsolation: true,
 			webSecurity: false,
@@ -156,6 +172,7 @@ export function createSourceSelectorWindow(): BrowserWindow {
 		backgroundColor: "#00000000",
 		webPreferences: {
 			preload: path.join(__dirname, "preload.mjs"),
+			additionalArguments: [ASSET_BASE_URL_ARG],
 			nodeIntegration: false,
 			contextIsolation: true,
 		},
@@ -207,6 +224,7 @@ export function createCountdownOverlayWindow(): BrowserWindow {
 		show: false,
 		webPreferences: {
 			preload: path.join(__dirname, "preload.mjs"),
+			additionalArguments: [ASSET_BASE_URL_ARG],
 			nodeIntegration: false,
 			contextIsolation: true,
 			backgroundThrottling: false,

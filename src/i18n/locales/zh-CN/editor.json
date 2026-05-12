@@ -5,6 +5,7 @@
 		"cancel": "取消",
 		"confirm": "确认"
 	},
+	"loadingVideo": "正在加载视频...",
 	"errors": {
 		"noVideoLoaded": "未加载视频",
 		"videoNotReady": "视频未就绪",
@@ -14,6 +15,7 @@
 		"failedToSaveVideo": "保存视频失败",
 		"exportFailed": "导出失败",
 		"exportFailedWithError": "导出失败：{{error}}",
+		"exportBackgroundLoadFailed": "导出失败：无法加载背景图片（{{url}}）",
 		"failedToSaveExport": "保存导出文件失败",
 		"failedToSaveExportedVideo": "保存导出的视频失败",
 		"failedToRevealInFolder": "在文件夹中显示时出错：{{error}}"
