@@ -69,7 +69,10 @@ export function createHudOverlayWindow(): BrowserWindow {
 			backgroundThrottling: false,
 		},
 	});
-	win.setIgnoreMouseEvents(true, { forward: true });
+	// Don't ignore mouse events at window creation: macOS needs the window to
+	// receive the initial mouseDown for OS-level window drag (-webkit-app-region)
+	// to engage. The renderer toggles ignore on/off via `onPointerMove`/
+	// `onPointerEnter`/`onPointerLeave` once it mounts.
 
 	// Follow the user across macOS Spaces (virtual desktops).
 	// Without this the HUD stays pinned to the Space it was first opened on.

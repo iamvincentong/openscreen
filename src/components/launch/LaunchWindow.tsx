@@ -281,13 +281,6 @@ export function LaunchWindow() {
 		return () => cancelAnimationFrame(id);
 	}, [isLanguageMenuOpen]);
 
-	useEffect(() => {
-		window.electronAPI?.setHudOverlayIgnoreMouseEvents?.(true);
-		return () => {
-			window.electronAPI?.setHudOverlayIgnoreMouseEvents?.(false);
-		};
-	}, []);
-
 	const [selectedSource, setSelectedSource] = useState("Screen");
 	const [hasSelectedSource, setHasSelectedSource] = useState(false);
 	const [, setRecordPointerDownCount] = useState(0);
@@ -365,12 +358,6 @@ export function LaunchWindow() {
 		// recording toolbar widened (issue #305).
 		<div
 			className={`h-full w-full min-w-0 max-w-full overflow-x-hidden overflow-y-hidden bg-transparent ${styles.electronDrag}`}
-			onPointerMove={(event) => {
-				const target = event.target as HTMLElement | null;
-				const shouldCapture = Boolean(target?.closest("[data-hud-interactive='true']"));
-				window.electronAPI?.setHudOverlayIgnoreMouseEvents?.(!shouldCapture);
-			}}
-			onPointerLeave={() => window.electronAPI?.setHudOverlayIgnoreMouseEvents?.(true)}
 		>
 			{systemLocaleSuggestion && (
 				<div
