@@ -536,7 +536,7 @@ export async function stitchWebmSegments(
 
 	const dest = createWriteStream(basePath, { flags: "a" });
 	await new Promise<void>((res, rej) => {
-		dest.once("open", res);
+		dest.once("open", () => res());
 		dest.once("error", rej);
 	});
 
