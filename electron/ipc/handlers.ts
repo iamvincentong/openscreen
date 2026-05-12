@@ -1668,6 +1668,20 @@ export function registerIpcHandlers(
 		}
 	});
 
+	ipcMain.handle("open-recordings-folder", async () => {
+		try {
+			await fs.mkdir(RECORDINGS_DIR, { recursive: true });
+			const result = await shell.openPath(RECORDINGS_DIR);
+			if (result) {
+				return { success: false, error: result };
+			}
+			return { success: true };
+		} catch (error) {
+			console.error("Failed to open recordings folder:", error);
+			return { success: false, error: String(error) };
+		}
+	});
+
 	ipcMain.handle("reveal-in-folder", async (_, filePath: string) => {
 		try {
 			// shell.showItemInFolder doesn't return a value, it throws on error

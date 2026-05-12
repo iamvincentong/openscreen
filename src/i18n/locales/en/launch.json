@@ -7,7 +7,8 @@
 		"pauseRecording": "Pause recording",
 		"resumeRecording": "Resume recording",
 		"openVideoFile": "Open video file",
-		"openProject": "Open project"
+		"openProject": "Open project",
+		"openRecordingsFolder": "Open recordings folder"
 	},
 	"audio": {
 		"enableSystemAudio": "Enable system audio",

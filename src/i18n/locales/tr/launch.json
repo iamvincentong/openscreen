@@ -7,7 +7,8 @@
 		"pauseRecording": "Kaydı duraklat",
 		"resumeRecording": "Kayda devam et",
 		"openVideoFile": "Video dosyası aç",
-		"openProject": "Proje aç"
+		"openProject": "Proje aç",
+		"openRecordingsFolder": "Kayıtlar klasörünü aç"
 	},
 	"audio": {
 		"enableSystemAudio": "Sistem sesini etkinleştir",

@@ -7,7 +7,8 @@
 		"pauseRecording": "إيقاف التسجيل مؤقتاً",
 		"resumeRecording": "استئناف التسجيل",
 		"openVideoFile": "فتح ملف فيديو",
-		"openProject": "فتح مشروع"
+		"openProject": "فتح مشروع",
+		"openRecordingsFolder": "فتح مجلد التسجيلات"
 	},
 	"audio": {
 		"enableSystemAudio": "تفعيل صوت النظام",

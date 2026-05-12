@@ -7,7 +7,8 @@
 		"pauseRecording": "暫停錄製",
 		"resumeRecording": "繼續錄製",
 		"openVideoFile": "開啟影片檔案",
-		"openProject": "開啟專案"
+		"openProject": "開啟專案",
+		"openRecordingsFolder": "開啟錄製資料夾"
 	},
 	"audio": {
 		"enableSystemAudio": "啟用系統音訊",

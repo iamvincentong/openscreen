@@ -7,6 +7,7 @@ import { FaFolderOpen } from "react-icons/fa6";
 import { FiMinus, FiX } from "react-icons/fi";
 import {
 	MdCancel,
+	MdFolderOpen,
 	MdMic,
 	MdMicOff,
 	MdMonitor,
@@ -53,6 +54,7 @@ const ICON_CONFIG = {
 	record: { icon: BsRecordCircle, size: ICON_SIZE },
 	videoFile: { icon: MdVideoFile, size: ICON_SIZE },
 	folder: { icon: FaFolderOpen, size: ICON_SIZE },
+	recordingsFolder: { icon: MdFolderOpen, size: ICON_SIZE },
 	minimize: { icon: FiMinus, size: ICON_SIZE },
 	close: { icon: FiX, size: ICON_SIZE },
 } as const;
@@ -332,6 +334,13 @@ export function LaunchWindow() {
 		const result = await nativeBridgeClient.project.loadProjectFile();
 		if (result.canceled || !result.success) return;
 		await window.electronAPI.switchToEditor();
+	};
+
+	const openRecordingsFolder = async () => {
+		const result = await window.electronAPI.openRecordingsFolder();
+		if (!result.success) {
+			console.error("Failed to open recordings folder:", result.error);
+		}
 	};
 
 	const sendHudOverlayHide = () => {
@@ -695,6 +704,17 @@ export function LaunchWindow() {
 								onClick={openProjectFile}
 							>
 								{getIcon("folder", "text-white/60")}
+							</button>
+						</Tooltip>
+
+						{/* Open recordings folder in OS file manager */}
+						<Tooltip content={t("tooltips.openRecordingsFolder")}>
+							<button
+								data-testid="launch-open-recordings-folder-button"
+								className={`${hudIconBtnClasses} ${styles.electronNoDrag}`}
+								onClick={openRecordingsFolder}
+							>
+								{getIcon("recordingsFolder", "text-white/60")}
 							</button>
 						</Tooltip>
 					</>
