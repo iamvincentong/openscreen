@@ -951,7 +951,7 @@ export function registerIpcHandlers(
 	getSourceSelectorWindow: () => BrowserWindow | null,
 	getCountdownOverlayWindow?: () => BrowserWindow | null,
 	onRecordingStateChange?: (recording: boolean, sourceName: string) => void,
-	_switchToHud?: () => void,
+	switchToHud?: () => void,
 ) {
 	ipcMain.handle("get-sources", async (_, opts) => {
 		const sources = await desktopCapturer.getSources(opts);
@@ -1071,6 +1071,23 @@ export function registerIpcHandlers(
 			mainWin.close();
 		}
 		createEditorWindow();
+	});
+
+	ipcMain.handle("switch-to-hud", () => {
+		if (switchToHud) switchToHud();
+	});
+
+	ipcMain.handle("start-new-recording", () => {
+		try {
+			setCurrentRecordingSessionState(null);
+			if (switchToHud) {
+				switchToHud();
+			}
+			return { success: true };
+		} catch (error) {
+			console.error("Failed to start new recording:", error);
+			return { success: false, error: String(error) };
+		}
 	});
 
 	ipcMain.handle("countdown-overlay-show", async (_, value: number, runId: number) => {
